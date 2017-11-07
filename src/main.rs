@@ -1,5 +1,6 @@
 extern crate simple_db;
 use std::io::{self, Write};
+use std::io::BufWriter;
 
 fn main() {
     let mut table = simple_db::Table::init();
@@ -25,7 +26,10 @@ fn main() {
             }
         }
         else {
-            match simple_db::statement_command(&input, &mut table) {
+            let mut stdout_writer : BufWriter<Box<Write>> = BufWriter::new(
+                Box::new(io::stdout()) 
+            );
+            match simple_db::statement_command(&input, &mut table, &mut stdout_writer) {
                 Ok(_) => println!("Executed."),
                 Err(err) => {
                     println!("{}", err);

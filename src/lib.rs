@@ -1,6 +1,9 @@
 use std::fmt;
 use std::error;
 use std::str;
+use std::io::BufWriter;
+use std::io::Write;
+
 
 #[derive(Debug)]
 pub enum DbError {
@@ -134,11 +137,13 @@ pub fn meta_command(_input : &str) -> Result<(), DbError> {
     Err(DbError::MetaUnrecognized)
 }
 
-pub fn statement_command(input : &str, table : &mut Table) -> Result<(), DbError> {
+pub fn statement_command(input : &str, table : &mut Table, 
+                         writer : &mut BufWriter<Box<Write>>) -> Result<(), DbError> {
     if input.starts_with("select") {
         for i in 0..table.num_rows {
             let r = Row::deserialize(&try!(table.get_row(i)));
-            println!("{:?}", r);
+            writer.write_fmt(format_args!("id: {}, used_id: {}, email: {}\n", 
+                                          r.id, r.user_id, r.email)).unwrap();
         }
     } else if input.starts_with("insert") {
         if table.num_rows >= TABLE_MAX_ROWS {
