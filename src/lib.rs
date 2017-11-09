@@ -1,9 +1,7 @@
 use std::fmt;
 use std::error;
 use std::str;
-use std::io::BufWriter;
 use std::io::Write;
-
 
 #[derive(Debug)]
 pub enum DbError {
@@ -138,13 +136,14 @@ pub fn meta_command(_input : &str) -> Result<(), DbError> {
 }
 
 pub fn statement_command(input : &str, table : &mut Table, 
-                         writer : &mut BufWriter<Box<Write>>) -> Result<(), DbError> {
+                         writer : &mut Write) -> Result<(), DbError> {
     if input.starts_with("select") {
         for i in 0..table.num_rows {
             let r = Row::deserialize(&try!(table.get_row(i)));
-            writer.write_fmt(format_args!("id: {}, used_id: {}, email: {}\n", 
+            writer.write_fmt(format_args!("({}, {}, {})\n", 
                                           r.id, r.user_id, r.email)).unwrap();
         }
+        writer.flush().unwrap();
     } else if input.starts_with("insert") {
         if table.num_rows >= TABLE_MAX_ROWS {
             return Err(DbError::TableFull);
@@ -172,7 +171,13 @@ pub fn statement_command(input : &str, table : &mut Table,
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
     fn it_works() {
+        let mut table = Table::init();
+        let mut buf : Vec<u8> = vec![];
+        statement_command("insert 1 user1 person1@example.com", &mut table, &mut buf).unwrap();
+        statement_command("select", &mut table, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), String::from("(1, user1, person1@example.com)\n"));
     }
 }
