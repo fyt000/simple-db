@@ -17,7 +17,8 @@ impl fmt::Display for DbError {
         match *self {
             DbError::MetaUnrecognized => write!(f, "Meta command unrecognized"),
             DbError::StatementUnrecognized => write!(f, "Statement unrecognized"),
-            DbError::StatementSyntaxError => write!(f, "Statement has syntax error"),
+            DbError::StatementSyntaxError => 
+                write!(f, "Statement has syntax error"),
             DbError::TableFull => write!(f, "Table is full"),
             DbError::ParsingError(ref err) => err.fmt(f),
         }
@@ -48,8 +49,14 @@ impl From<std::num::ParseIntError> for DbError {
     }
 }
 
-const USERID_SIZE: usize = 32;
-const EMAIL_SIZE: usize = 255;
+const USERID_SIZE: usize = 31;
+const EMAIL_SIZE: usize = 254;
+// Store size of email/id instead of null terminating
+// This means we need 2 extra bytes for serialization,
+// and we still need a paging table of some sort to actually
+// make this dynamic sizing useful...
+// To sync with the tutorial, I am going to use 31 and 254
+// as the userid and email size instead of 32 and 255
 const ROW_SIZE: usize = EMAIL_SIZE + USERID_SIZE + 4 + 2;
 const PAGE_SIZE: usize = 4096;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
@@ -118,7 +125,7 @@ impl Table {
     }
     fn get_row(&mut self, row_num : usize) -> Result<&mut [u8], DbError> {
         let page_num = row_num / ROWS_PER_PAGE;
-        if self.pages.len() >= TABLE_MAX_PAGES {
+        if page_num >= TABLE_MAX_PAGES {
             return Err(DbError::TableFull);
         }
         while self.pages.len() <= page_num {
@@ -176,8 +183,71 @@ mod tests {
     fn it_works() {
         let mut table = Table::init();
         let mut buf : Vec<u8> = vec![];
-        statement_command("insert 1 user1 person1@example.com", &mut table, &mut buf).unwrap();
+        statement_command("insert 1 user1 person1@example.com", 
+                          &mut table, &mut buf).unwrap();
         statement_command("select", &mut table, &mut buf).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), String::from("(1, user1, person1@example.com)\n"));
+        assert_eq!(String::from_utf8(buf).unwrap(), 
+                   String::from("(1, user1, person1@example.com)\n"));
+    }
+
+    #[test]
+    fn table_max() {
+        let mut table = Table::init();
+        for i in 0..1400 {
+            let mut buf : Vec<u8> = vec![];
+            let insert_str = format!("insert {} user{} person{}@example.com", 
+                                     i, i, i );
+            statement_command(&insert_str, &mut table, &mut buf).unwrap();
+        }
+        let mut buf : Vec<u8> = vec![];
+        statement_command("select", &mut table, &mut buf).unwrap(); 
+        let mut idx = 0;
+        let whole_str = String::from_utf8(buf).unwrap();
+        let lines = whole_str.lines();
+        for rec in lines {
+            assert_eq!(rec, format!("({}, user{}, person{}@example.com)", 
+                                    idx, idx, idx));
+            idx += 1;
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Table is full")]
+    fn table_full() {
+        let mut table = Table::init();
+        for _i in 0..1401 {
+            let mut buf : Vec<u8> = vec![];
+            match statement_command("insert 1 user1 person1@example.com", 
+                                    &mut table, &mut buf) {
+                Ok(_) => (),
+                Err(DbError::TableFull) => panic!("Table is full"),
+                _ => panic!("incorrect panic"),
+            }
+        }
+    }
+
+    #[test]
+    fn long_name() {
+        let mut table = Table::init();
+        let mut buf : Vec<u8> = vec![];
+        let long_user = "a".repeat(31);
+        let long_email = "a".repeat(254);
+        let long_insert = format!("insert 1 {} {}", long_user, long_email);
+        statement_command(long_insert.as_str(), &mut table, &mut buf).unwrap();
+        statement_command("select", &mut table, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), 
+                   format!("(1, {}, {})\n", long_user, long_email));
+    }
+
+    #[test]
+    #[should_panic(expected = "uint parse error")]
+    fn uint_parse() {
+        let mut table = Table::init();
+        let mut buf : Vec<u8> = vec![];
+        match statement_command("insert -1 x x", &mut table, &mut buf) {
+            Ok(_) => (),
+            Err(DbError::ParsingError(_)) => panic!("uint parse error"),
+            _ => panic!("incorrect panic"),
+        }
     }
 }
