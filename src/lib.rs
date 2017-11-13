@@ -2,6 +2,11 @@ use std::fmt;
 use std::error;
 use std::str;
 use std::io::Write;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::fs::File;
+use std::fs::OpenOptions;
 
 #[derive(Debug)]
 pub enum DbError {
@@ -105,19 +110,93 @@ impl Row {
     }
 }
 
-pub struct Table {
+struct Pager {
+    file : File,
+    file_length : u64,
     pages: Vec<Vec<u8>>,
+}
+
+// do I need a drop for Pager so file gets dropped?
+impl Pager {
+    fn open(filename : &str) -> Pager {
+        let file = OpenOptions::new().read(true)
+                                     .write(true)
+                                     .create(true)
+                                     .open(filename)
+                                     .expect("Cannot open persistent file");
+        let meta = file.metadata().expect("Cannot open file metadata");
+        let mut pager = Pager {
+            file,
+            file_length : meta.len(),
+            pages: Vec::with_capacity(TABLE_MAX_PAGES),
+        };
+        for _i in 0..TABLE_MAX_PAGES {
+            // vec![] should be of capacity 0
+            pager.pages.push(vec![]);
+        }
+        pager
+    }
+
+    fn get(&mut self, page_num : usize) -> &mut [u8] {
+        if page_num > TABLE_MAX_PAGES {
+            panic!("Tried to fetch page number out of bounds. {} > {}\n", 
+                   page_num, TABLE_MAX_PAGES);
+        }
+        if self.pages[page_num].len() == 0 {
+            self.pages[page_num] = vec![0; PAGE_SIZE];
+            let mut num_pages : u64 = self.file_length / PAGE_SIZE as u64;
+            if self.file_length % PAGE_SIZE as u64 != 0 {
+                num_pages += 1;
+            }
+            if (page_num as u64) < num_pages {
+                let start_offset = (page_num * PAGE_SIZE) as u64;  
+                self.file.seek(SeekFrom::Start(start_offset))
+                    .expect("Unable to read page from file");
+                // if this is the last page, and not full
+                // then we can only read whatever we have
+                let mut size = PAGE_SIZE;
+                if self.file_length < start_offset + (size as u64) {
+                    size = (self.file_length - start_offset) as usize;
+                }
+                self.file.read_exact(&mut self.pages[page_num][..size])
+                    .expect("Unable to read page from file");
+            }
+        }
+        return &mut self.pages[page_num][..]; 
+    }
+
+    fn flush(&mut self, page_num : usize, size : usize) {
+        if self.pages[page_num].len() == 0 {
+            // panic!("Flushing empty page");
+            return;
+        }
+        self.file.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
+            .expect("Cannot write to file");
+        self.file.write_all(&self.pages[page_num][..size])
+            .expect("Cannot write to file");
+    }
+
+}
+
+pub struct Table {
+    pager : Pager,
     num_rows : usize,
 }
 
 impl Table {
-    pub fn init() -> Table {
-        Table { pages: Vec::with_capacity(TABLE_MAX_PAGES), num_rows: 0}
+    pub fn db_open(filename : &str) -> Table {
+        let pager = Pager::open(filename);
+        let num_rows = pager.file_length / ROW_SIZE as u64;
+        Table {
+            pager,
+            num_rows : num_rows as usize, 
+        } 
     }
+
     fn add_row(&mut self, row : &Row) -> Result<(), DbError> {
         {
             let num_rows = self.num_rows;
-            let row_data = try!(self.get_row(num_rows));
+            let row_data = self.get_row(num_rows)?;
             row.serialize(row_data);
         }
         self.num_rows += 1;
@@ -128,12 +207,22 @@ impl Table {
         if page_num >= TABLE_MAX_PAGES {
             return Err(DbError::TableFull);
         }
-        while self.pages.len() <= page_num {
-            self.pages.push(vec![0; PAGE_SIZE]);
-        }
         let row_offset : usize = row_num % ROWS_PER_PAGE;
         let byte_offset : usize = row_offset * ROW_SIZE;
-        return Ok(&mut self.pages[page_num][byte_offset..byte_offset+ROW_SIZE]);
+        return Ok(&mut self.pager.get(page_num)[byte_offset..byte_offset+ROW_SIZE]);
+    }
+}
+
+impl Drop for Table {
+    fn drop(&mut self) {
+        let full_pages = self.num_rows / ROWS_PER_PAGE;
+        for i in 0..full_pages {
+            self.pager.flush(i, PAGE_SIZE);
+        }
+        let additional_rows = self.num_rows % ROWS_PER_PAGE;
+        if additional_rows > 0 {
+            self.pager.flush(full_pages, additional_rows * ROW_SIZE);
+        }
     }
 }
 
@@ -146,7 +235,7 @@ pub fn statement_command(input : &str, table : &mut Table,
                          writer : &mut Write) -> Result<(), DbError> {
     if input.starts_with("select") {
         for i in 0..table.num_rows {
-            let r = Row::deserialize(&try!(table.get_row(i)));
+            let r = Row::deserialize(&(table.get_row(i)?));
             writer.write_fmt(format_args!("({}, {}, {})\n", 
                                           r.id, r.user_id, r.email)).unwrap();
         }
@@ -159,7 +248,7 @@ pub fn statement_command(input : &str, table : &mut Table,
         if params.len() != 4 {
             return Err(DbError::StatementSyntaxError);
         }
-        let id = try!(params[1].parse::<u32>());
+        let id = params[1].parse::<u32>()?;
         if params[2].len() > USERID_SIZE || params[3].len() > EMAIL_SIZE {
             return Err(DbError::StatementSyntaxError);
         }
@@ -168,7 +257,7 @@ pub fn statement_command(input : &str, table : &mut Table,
             user_id : String::from(params[2]),
             email : String::from(params[3]),
         };
-        try!(table.add_row(&row));
+        table.add_row(&row)?;
     } else {
         return Err(DbError::StatementUnrecognized);
     }
@@ -181,7 +270,7 @@ mod tests {
     use super::*;
     #[test]
     fn it_works() {
-        let mut table = Table::init();
+        let mut table = Table::db_open("test1.db");
         let mut buf : Vec<u8> = vec![];
         statement_command("insert 1 user1 person1@example.com", 
                           &mut table, &mut buf).unwrap();
@@ -192,7 +281,7 @@ mod tests {
 
     #[test]
     fn table_max() {
-        let mut table = Table::init();
+        let mut table = Table::db_open("test2.db");
         for i in 0..1400 {
             let mut buf : Vec<u8> = vec![];
             let insert_str = format!("insert {} user{} person{}@example.com", 
@@ -214,7 +303,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Table is full")]
     fn table_full() {
-        let mut table = Table::init();
+        let mut table = Table::db_open("test3.db");
         for _i in 0..1401 {
             let mut buf : Vec<u8> = vec![];
             match statement_command("insert 1 user1 person1@example.com", 
@@ -228,7 +317,7 @@ mod tests {
 
     #[test]
     fn long_name() {
-        let mut table = Table::init();
+        let mut table = Table::db_open("test4.db");
         let mut buf : Vec<u8> = vec![];
         let long_user = "a".repeat(31);
         let long_email = "a".repeat(254);
@@ -242,7 +331,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "uint parse error")]
     fn uint_parse() {
-        let mut table = Table::init();
+        let mut table = Table::db_open("test5.db");
         let mut buf : Vec<u8> = vec![];
         match statement_command("insert -1 x x", &mut table, &mut buf) {
             Ok(_) => (),
