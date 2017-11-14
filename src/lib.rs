@@ -171,7 +171,6 @@ impl Pager {
 
     fn flush(&mut self, page_num : usize, size : usize) {
         if self.pages[page_num].len() == 0 {
-            // panic!("Flushing empty page");
             return;
         }
         self.file.seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
@@ -190,7 +189,12 @@ pub struct Table {
 impl Table {
     pub fn db_open(filename : PathBuf) -> Table {
         let pager = Pager::open(filename);
-        let num_rows = pager.file_length / ROW_SIZE as u64;
+        // the tutorial is wrong
+        // let num_rows = pager.file_length / ROW_SIZE as u64;
+        let file_length = pager.file_length as usize; //well..
+        let pages = file_length / PAGE_SIZE;
+        let additional = (file_length - (pages * PAGE_SIZE)) / ROW_SIZE;
+        let num_rows = (additional + pages * ROWS_PER_PAGE);
         Table {
             pager,
             num_rows : num_rows as usize, 
@@ -360,34 +364,34 @@ mod tests {
     #[test]
     fn table_max_persist() {
         let tmp_dir = TempDir::new("simple-db").unwrap();
-        let path1 = tmp_dir.path().join("test.db");
-        let path2 = path1.clone();
-        let total_lines = 399;
-        {
-            let mut table = Table::db_open(path1);
-            for i in 0..total_lines {
+        for total_lines in 0..1400 {
+            let path1 = tmp_dir.path().join(format!("test{}.db",total_lines));
+            let path2 = path1.clone();
+            {
+                let mut table = Table::db_open(path1);
+                for i in 0..total_lines {
+                    let mut buf : Vec<u8> = vec![];
+                    let insert_str = format!("insert {} user{} person{}@example.com", 
+                                            i, i, i );
+                    statement_command(&insert_str, &mut table, &mut buf).unwrap();
+                }
+            }
+            {
+                let mut table = Table::db_open(path2);
                 let mut buf : Vec<u8> = vec![];
-                let insert_str = format!("insert {} user{} person{}@example.com", 
-                                        i, i, i );
-                statement_command(&insert_str, &mut table, &mut buf).unwrap();
+                statement_command("select", &mut table, &mut buf).unwrap(); 
+                let mut idx = 0;
+                let whole_str = String::from_utf8(buf).unwrap();
+                let lines = whole_str.lines();
+                for rec in lines {
+                    assert_eq!(rec, format!("({}, user{}, person{}@example.com)", 
+                                            idx, idx, idx));
+                    idx += 1;
+                }
+                assert_eq!(idx, total_lines);
             }
+
         }
-        let ten_millis = time::Duration::from_millis(50);
-        let now = time::Instant::now();
-        thread::sleep(ten_millis);
-        {
-            let mut table = Table::db_open(path2);
-            let mut buf : Vec<u8> = vec![];
-            statement_command("select", &mut table, &mut buf).unwrap(); 
-            let mut idx = 0;
-            let whole_str = String::from_utf8(buf).unwrap();
-            let lines = whole_str.lines();
-            for rec in lines {
-                assert_eq!(rec, format!("({}, user{}, person{}@example.com)", 
-                                        idx, idx, idx));
-                idx += 1;
-            }
-            assert_eq!(idx, total_lines);
-        }
+
     }
 }
