@@ -1,3 +1,5 @@
+extern crate tempdir;
+
 use std::fmt;
 use std::error;
 use std::str;
@@ -7,6 +9,8 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::path::PathBuf;
+
 
 #[derive(Debug)]
 pub enum DbError {
@@ -118,7 +122,7 @@ struct Pager {
 
 // do I need a drop for Pager so file gets dropped?
 impl Pager {
-    fn open(filename : &str) -> Pager {
+    fn open(filename : PathBuf) -> Pager {
         let file = OpenOptions::new().read(true)
                                      .write(true)
                                      .create(true)
@@ -184,7 +188,7 @@ pub struct Table {
 }
 
 impl Table {
-    pub fn db_open(filename : &str) -> Table {
+    pub fn db_open(filename : PathBuf) -> Table {
         let pager = Pager::open(filename);
         let num_rows = pager.file_length / ROW_SIZE as u64;
         Table {
@@ -268,9 +272,13 @@ pub fn statement_command(input : &str, table : &mut Table,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{thread, time};
+    use tempdir::TempDir;
     #[test]
     fn it_works() {
-        let mut table = Table::db_open("test1.db");
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let file_path = tmp_dir.path().join("test1.db");
+        let mut table = Table::db_open(file_path);
         let mut buf : Vec<u8> = vec![];
         statement_command("insert 1 user1 person1@example.com", 
                           &mut table, &mut buf).unwrap();
@@ -281,7 +289,9 @@ mod tests {
 
     #[test]
     fn table_max() {
-        let mut table = Table::db_open("test2.db");
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let file_path = tmp_dir.path().join("test1.db");
+        let mut table = Table::db_open(file_path);
         for i in 0..1400 {
             let mut buf : Vec<u8> = vec![];
             let insert_str = format!("insert {} user{} person{}@example.com", 
@@ -298,12 +308,15 @@ mod tests {
                                     idx, idx, idx));
             idx += 1;
         }
+        assert_eq!(idx, 1400);
     }
 
     #[test]
     #[should_panic(expected = "Table is full")]
     fn table_full() {
-        let mut table = Table::db_open("test3.db");
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let file_path = tmp_dir.path().join("test1.db");
+        let mut table = Table::db_open(file_path);
         for _i in 0..1401 {
             let mut buf : Vec<u8> = vec![];
             match statement_command("insert 1 user1 person1@example.com", 
@@ -317,7 +330,9 @@ mod tests {
 
     #[test]
     fn long_name() {
-        let mut table = Table::db_open("test4.db");
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let file_path = tmp_dir.path().join("test1.db");
+        let mut table = Table::db_open(file_path);
         let mut buf : Vec<u8> = vec![];
         let long_user = "a".repeat(31);
         let long_email = "a".repeat(254);
@@ -331,12 +346,48 @@ mod tests {
     #[test]
     #[should_panic(expected = "uint parse error")]
     fn uint_parse() {
-        let mut table = Table::db_open("test5.db");
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let file_path = tmp_dir.path().join("test1.db");
+        let mut table = Table::db_open(file_path);
         let mut buf : Vec<u8> = vec![];
         match statement_command("insert -1 x x", &mut table, &mut buf) {
             Ok(_) => (),
             Err(DbError::ParsingError(_)) => panic!("uint parse error"),
             _ => panic!("incorrect panic"),
+        }
+    }
+
+    #[test]
+    fn table_max_persist() {
+        let tmp_dir = TempDir::new("simple-db").unwrap();
+        let path1 = tmp_dir.path().join("test.db");
+        let path2 = path1.clone();
+        let total_lines = 399;
+        {
+            let mut table = Table::db_open(path1);
+            for i in 0..total_lines {
+                let mut buf : Vec<u8> = vec![];
+                let insert_str = format!("insert {} user{} person{}@example.com", 
+                                        i, i, i );
+                statement_command(&insert_str, &mut table, &mut buf).unwrap();
+            }
+        }
+        let ten_millis = time::Duration::from_millis(50);
+        let now = time::Instant::now();
+        thread::sleep(ten_millis);
+        {
+            let mut table = Table::db_open(path2);
+            let mut buf : Vec<u8> = vec![];
+            statement_command("select", &mut table, &mut buf).unwrap(); 
+            let mut idx = 0;
+            let whole_str = String::from_utf8(buf).unwrap();
+            let lines = whole_str.lines();
+            for rec in lines {
+                assert_eq!(rec, format!("({}, user{}, person{}@example.com)", 
+                                        idx, idx, idx));
+                idx += 1;
+            }
+            assert_eq!(idx, total_lines);
         }
     }
 }

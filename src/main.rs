@@ -1,6 +1,7 @@
 extern crate simple_db;
 use std::io::{self, Write};
 use std::env;
+use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -8,7 +9,7 @@ fn main() {
         panic!("need to supply database file");
     }
 
-    let mut table = simple_db::Table::db_open(args[1].as_str());
+    let mut table = simple_db::Table::db_open(PathBuf::from(args[1].as_str()));
     loop {
         print!("db > ");
         io::stdout().flush().unwrap();
