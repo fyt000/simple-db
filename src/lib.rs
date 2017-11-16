@@ -194,7 +194,7 @@ impl Table {
         let file_length = pager.file_length as usize; //well..
         let pages = file_length / PAGE_SIZE;
         let additional = (file_length - (pages * PAGE_SIZE)) / ROW_SIZE;
-        let num_rows = (additional + pages * ROWS_PER_PAGE);
+        let num_rows = additional + pages * ROWS_PER_PAGE;
         Table {
             pager,
             num_rows : num_rows as usize, 
@@ -203,22 +203,14 @@ impl Table {
 
     fn add_row(&mut self, row : &Row) -> Result<(), DbError> {
         {
-            let num_rows = self.num_rows;
-            let row_data = self.get_row(num_rows)?;
+            let mut cursor = Cursor::table_end(self);
+            let row_data = cursor.get_row()?;
             row.serialize(row_data);
         }
         self.num_rows += 1;
         Ok(())
     }
-    fn get_row(&mut self, row_num : usize) -> Result<&mut [u8], DbError> {
-        let page_num = row_num / ROWS_PER_PAGE;
-        if page_num >= TABLE_MAX_PAGES {
-            return Err(DbError::TableFull);
-        }
-        let row_offset : usize = row_num % ROWS_PER_PAGE;
-        let byte_offset : usize = row_offset * ROW_SIZE;
-        return Ok(&mut self.pager.get(page_num)[byte_offset..byte_offset+ROW_SIZE]);
-    }
+
 }
 
 impl Drop for Table {
@@ -234,18 +226,59 @@ impl Drop for Table {
     }
 }
 
+pub struct Cursor<'a> {
+    table : &'a mut Table,
+    row_num : usize,
+    end_of_table : bool,
+}
+
+impl<'a> Cursor<'a> {
+    fn table_start(table : &'a mut Table) -> Cursor {
+        let end_of_table = table.num_rows == 0;
+        Cursor {
+            table,
+            row_num : 0,
+            end_of_table, 
+        }
+    }
+    fn table_end(table : &'a mut Table) -> Cursor {
+        let row_num = table.num_rows;
+        Cursor {
+            table,
+            row_num,
+            end_of_table : true,
+        }
+    }
+    fn get_row(&mut self) -> Result<&mut [u8], DbError> {
+        let page_num = self.row_num / ROWS_PER_PAGE;
+        if page_num >= TABLE_MAX_PAGES {
+            return Err(DbError::TableFull);
+        }
+        let row_offset : usize = self.row_num % ROWS_PER_PAGE;
+        let byte_offset : usize = row_offset * ROW_SIZE;
+        return Ok(&mut self.table.pager.get(page_num)[byte_offset..byte_offset+ROW_SIZE]);
+    }
+    fn advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true;
+        }
+    } 
+} 
 
 pub fn meta_command(_input : &str) -> Result<(), DbError> {
     Err(DbError::MetaUnrecognized)
 }
 
-pub fn statement_command(input : &str, table : &mut Table, 
+pub fn statement_command(input : &str, mut table : &mut Table, 
                          writer : &mut Write) -> Result<(), DbError> {
     if input.starts_with("select") {
-        for i in 0..table.num_rows {
-            let r = Row::deserialize(&(table.get_row(i)?));
+        let mut cursor = Cursor::table_start(&mut table);
+        while !cursor.end_of_table {
+            let r = Row::deserialize(&(cursor.get_row()?));
             writer.write_fmt(format_args!("({}, {}, {})\n", 
                                           r.id, r.user_id, r.email)).unwrap();
+            cursor.advance();
         }
         writer.flush().unwrap();
     } else if input.starts_with("insert") {
@@ -276,7 +309,6 @@ pub fn statement_command(input : &str, table : &mut Table,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{thread, time};
     use tempdir::TempDir;
     #[test]
     fn it_works() {
